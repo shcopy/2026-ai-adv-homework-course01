@@ -4,6 +4,24 @@
 
 ---
 
+## [Unreleased]
+
+### Added
+- 綠界 AIO 全方位金流整合（測試環境）
+  - `src/lib/ecpay.js`：CheckMacValue SHA256 計算、AIO 建單參數組合、QueryTradeInfo 主動查詢
+  - `GET /api/orders/:id/ecpay-params`：回傳含 CheckMacValue 的完整 AIO 表單參數，支援 `choosePayment` query 參數（預設 `ALL`）
+  - `POST /api/orders/:id/verify-payment`：呼叫綠界 QueryTradeInfo/V5，依 TradeStatus 更新訂單狀態
+  - `POST /api/ecpay/notify`：ReturnURL 佔位端點（本機無法接收 ECPay Callback，僅回 `1|OK`）
+
+### Changed
+- `POST /api/orders`：建立訂單時同步產生並儲存 `merchant_trade_no`（格式：`EC` + Unix ms）
+- `src/database.js`：新增 orders 資料表遷移，透過 `ALTER TABLE` 安全加入 `merchant_trade_no` 欄位
+- `public/js/pages/checkout.js`：送出訂單後取得 ECPay 表單參數並自動 submit 至綠界付款頁，取代原先跳轉訂單詳情的行為
+- `public/js/pages/order-detail.js`：以「前往綠界付款」與「確認付款結果」取代模擬付款按鈕；`?payment=done` URL 參數觸發返回提示訊息
+- `views/pages/order-detail.ejs`：同上，更新按鈕 UI
+
+---
+
 ## [1.0.0] - 2026-04-22
 
 ### Added

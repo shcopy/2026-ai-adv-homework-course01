@@ -11,7 +11,9 @@
 ├── database.sqlite                # SQLite 資料庫檔案（執行期自動建立）
 │
 ├── src/
-│   ├── database.js                # DB 連線 + 建立所有資料表 + 植入種子資料
+│   ├── database.js                # DB 連線 + 建立所有資料表 + 植入種子資料 + migration
+│   ├── lib/
+│   │   └── ecpay.js               # ECPay 工具：CheckMacValue、buildAioParams、queryTradeInfo
 │   ├── middleware/
 │   │   ├── authMiddleware.js      # JWT Bearer 驗證，解碼後掛到 req.user
 │   │   ├── adminMiddleware.js     # 檢查 req.user.role === 'admin'
@@ -21,7 +23,8 @@
 │       ├── authRoutes.js          # POST /register, POST /login, GET /profile
 │       ├── productRoutes.js       # GET /products, GET /products/:id（公開）
 │       ├── cartRoutes.js          # GET/POST /cart, PATCH/DELETE /cart/:itemId（雙模式認證）
-│       ├── orderRoutes.js         # POST/GET /orders, GET /orders/:id, PATCH /orders/:id/pay
+│       ├── orderRoutes.js         # POST/GET /orders, GET/POST /orders/:id/ecpay-params|verify-payment
+│       ├── ecpayRoutes.js         # POST /api/ecpay/notify（ReturnURL 佔位，本機不接收）
 │       ├── adminProductRoutes.js  # GET/POST /admin/products, PUT/DELETE /admin/products/:id
 │       ├── adminOrderRoutes.js    # GET /admin/orders, GET /admin/orders/:id
 │       └── pageRoutes.js          # 所有 EJS 頁面路由（/ /products/:id /cart /checkout ...）
@@ -64,10 +67,10 @@
 │           ├── index.js           # 首頁：商品列表、分頁、加入購物車
 │           ├── product-detail.js  # 商品詳情：加入購物車
 │           ├── cart.js            # 購物車：列出、更新數量、移除
-│           ├── checkout.js        # 結帳：提交訂單
+│           ├── checkout.js        # 結帳：提交訂單 → 取 ECPay 參數 → submit form 跳轉綠界
 │           ├── login.js           # 登入/註冊表單
 │           ├── orders.js          # 我的訂單列表
-│           ├── order-detail.js    # 訂單詳情 + 模擬付款
+│           ├── order-detail.js    # 訂單詳情 + 前往綠界付款 + 確認付款結果
 │           ├── admin-products.js  # 後台商品 CRUD
 │           └── admin-orders.js    # 後台訂單列表與詳情
 │
@@ -93,6 +96,7 @@ npm start
        │    ├─ app.use(cors)               → FRONTEND_URL 或 http://localhost:3001
        │    ├─ app.use(express.json)
        │    ├─ app.use(sessionMiddleware)   → 解析 X-Session-Id header
+       │    ├─ app.use('/api/ecpay', ...)   → ecpayRoutes（ReturnURL 佔位，無需認證）
        │    ├─ app.use('/api/auth', ...)
        │    ├─ app.use('/api/admin/products', ...)
        │    ├─ app.use('/api/admin/orders', ...)
@@ -122,7 +126,9 @@ npm start
 | `POST /api/orders` | orderRoutes.js | JWT | 從購物車建立訂單 |
 | `GET /api/orders` | orderRoutes.js | JWT | 自己的訂單列表 |
 | `GET /api/orders/:id` | orderRoutes.js | JWT | 訂單詳情 |
-| `PATCH /api/orders/:id/pay` | orderRoutes.js | JWT | 模擬付款 |
+| `GET /api/orders/:id/ecpay-params` | orderRoutes.js | JWT | 取得 ECPay AIO 表單參數（含 CheckMacValue） |
+| `POST /api/orders/:id/verify-payment` | orderRoutes.js | JWT | 主動向綠界查詢付款結果並更新訂單狀態 |
+| `POST /api/ecpay/notify` | ecpayRoutes.js | 無 | ReturnURL 佔位（本機無法接收，回應 `1\|OK`） |
 | `GET /api/admin/products` | adminProductRoutes.js | JWT + admin | 後台商品列表 |
 | `POST /api/admin/products` | adminProductRoutes.js | JWT + admin | 新增商品 |
 | `PUT /api/admin/products/:id` | adminProductRoutes.js | JWT + admin | 編輯商品 |
@@ -162,6 +168,7 @@ npm start
 | `STOCK_INSUFFICIENT` | 400 | 庫存不足 |
 | `CART_EMPTY` | 400 | 購物車為空無法結帳 |
 | `INVALID_STATUS` | 400 | 訂單狀態不是 pending，無法付款 |
+| `ECPAY_ERROR` | 502 | 無法連線至綠界 QueryTradeInfo API |
 | `INTERNAL_ERROR` | 500 | 伺服器內部錯誤（不洩漏細節） |
 
 ## 認證與授權機制
@@ -261,6 +268,7 @@ npm start
 | recipient_address | TEXT | NOT NULL | 收件地址 |
 | total_amount | INTEGER | NOT NULL | 訂單總金額（新台幣） |
 | status | TEXT | NOT NULL, DEFAULT 'pending', CHECK(IN 'pending','paid','failed') | 訂單狀態 |
+| merchant_trade_no | TEXT | — | 綠界交易編號（格式：`EC` + Unix ms，e.g. `EC1745483200000`），透過 ALTER TABLE migration 新增 |
 | created_at | TEXT | NOT NULL, DEFAULT datetime('now') | 建立時間 |
 
 ### order_items
@@ -286,7 +294,7 @@ npm start
 | `GET /checkout` | front | 結帳頁面 |
 | `GET /login` | front | 登入/註冊 |
 | `GET /orders` | front | 我的訂單列表 |
-| `GET /orders/:id` | front | 訂單詳情（`?payment=success/fail` 顯示付款結果） |
+| `GET /orders/:id` | front | 訂單詳情（`?payment=done` 顯示返回提示）、前往綠界付款、確認付款結果 |
 | `GET /admin/products` | admin | 後台商品管理 |
 | `GET /admin/orders` | admin | 後台訂單管理 |
 

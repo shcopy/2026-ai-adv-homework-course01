@@ -8,12 +8,11 @@
 | 商品瀏覽（列表/詳情） | ✅ 完成 |
 | 購物車（訪客 + 登入雙模式） | ✅ 完成 |
 | 訂單建立與查詢 | ✅ 完成 |
-| 模擬付款 | ✅ 完成 |
 | 後台商品管理（CRUD） | ✅ 完成 |
 | 後台訂單查閱 | ✅ 完成 |
 | 前台 EJS 頁面渲染 | ✅ 完成 |
 | OpenAPI 文件產生 | ✅ 完成 |
-| 綠界金流整合 | ❌ 未實裝（.env 有參數，無對應 code） |
+| 綠界 AIO 金流整合 | ✅ 完成 |
 
 ---
 
@@ -158,17 +157,63 @@
 
 **行為**：查詢須符合 `id = ? AND user_id = ?`（防止越權存取他人訂單）。回傳完整訂單含 items 陣列（每筆含 `id, product_id, product_name, product_price, quantity`）。
 
-### 4.4 模擬付款（PATCH /api/orders/:id/pay）
+### 4.4 取得綠界 AIO 表單參數（GET /api/orders/:id/ecpay-params）
 
-**必填欄位**：`action`（`"success"` 或 `"fail"`）
+**認證**：JWT Bearer token
+
+**查詢參數**：
+- `choosePayment`（選填）：指定付款方式（`ALL` / `Credit` / `WebATM` / `ATM` / `CVS` / `BARCODE` / `ApplePay` / `TWQR` / `BNPL` / `WeiXin` / `DigitalPayment`），不傳預設為 `ALL`（讓使用者在綠界頁面自行選擇）
 
 **行為**：
 - 確認訂單屬於此使用者且 `status === 'pending'`（非 pending → `400 INVALID_STATUS`）
-- `action: "success"` → status 更新為 `'paid'`
-- `action: "fail"` → status 更新為 `'failed'`
+- 確認訂單有 `merchant_trade_no`（舊訂單若缺失 → `400 VALIDATION_ERROR`）
+- 從 `order_items` 取商品名稱組成 `ItemName`（以 `#` 分隔，超過 200 字元自動截斷）
+- 計算 `CheckMacValue`（SHA256，依 ECPay 規格的 ecpayUrlEncode 演算法）
+- 回傳完整 AIO 表單參數與送出目標 URL：
+  ```json
+  {
+    "data": {
+      "action": "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5",
+      "params": {
+        "MerchantID": "3002607",
+        "MerchantTradeNo": "EC1745...",
+        "MerchantTradeDate": "2026/04/24 14:00:00",
+        "PaymentType": "aio",
+        "TotalAmount": "1680",
+        "TradeDesc": "花店訂單",
+        "ItemName": "浪漫玫瑰花束",
+        "ReturnURL": "http://localhost:3001/api/ecpay/notify",
+        "ChoosePayment": "ALL",
+        "EncryptType": "1",
+        "ClientBackURL": "http://localhost:3001/orders/:id?payment=done",
+        "CheckMacValue": "..."
+      }
+    }
+  }
+  ```
+
+前端收到後應動態建立隱藏 `<form>` 並 POST submit，瀏覽器會自動跳轉至綠界付款頁。
+
+### 4.5 主動查詢付款結果（POST /api/orders/:id/verify-payment）
+
+**認證**：JWT Bearer token
+
+**行為**：
+- 以訂單的 `merchant_trade_no` 呼叫綠界 `QueryTradeInfo/V5` API（POST form-urlencoded）
+- 解析回應的 URL-encoded 字串取得 `TradeStatus`
+- `TradeStatus === '1'` → 更新 status 為 `'paid'`
+- `TradeStatus === '0'`（尚未付款）→ 維持 `'pending'`，不更新
+- 其他值（交易異常、取消）→ 更新 status 為 `'failed'`
 - 回傳更新後的完整訂單（含 items）
 
-**狀態機**：`pending` → `paid` 或 `failed`（不可逆，paid/failed 無法再付款）
+**錯誤情境**：
+- `400 VALIDATION_ERROR`：訂單缺少 merchant_trade_no
+- `404 NOT_FOUND`：訂單不存在
+- `502 ECPAY_ERROR`：無法連線至綠界查詢 API
+
+**狀態機**：`pending` → `paid` 或 `failed`（不可逆）
+
+**本地開發限制**：因 localhost 無法接收綠界 Server-to-Server ReturnURL callback，付款結果確認須由使用者返回訂單詳情頁後手動點「確認付款結果」觸發此 API。
 
 ---
 
@@ -230,9 +275,74 @@
 | `/` | `pages/index.js` | 商品列表、分頁、加入購物車 |
 | `/products/:id` | `pages/product-detail.js` | 商品詳情、加入購物車 |
 | `/cart` | `pages/cart.js` | 購物車列表、更新數量、移除、前往結帳 |
-| `/checkout` | `pages/checkout.js` | 填寫收件資訊、送出訂單 |
+| `/checkout` | `pages/checkout.js` | 填寫收件資訊、送出訂單，建立後自動導向綠界付款頁 |
 | `/login` | `pages/login.js` | 登入與註冊切換 |
 | `/orders` | `pages/orders.js` | 我的訂單列表 |
-| `/orders/:id` | `pages/order-detail.js` | 訂單詳情、模擬付款按鈕 |
+| `/orders/:id` | `pages/order-detail.js` | 訂單詳情、「前往綠界付款」與「確認付款結果」按鈕 |
 | `/admin/products` | `pages/admin-products.js` | 商品 CRUD 後台介面 |
 | `/admin/orders` | `pages/admin-orders.js` | 訂單查閱後台介面 |
+
+---
+
+## 8. 綠界 AIO 金流整合
+
+### 8.1 整合架構
+
+本專案採 ECPay AIO（全方位金流）測試環境，使用 CheckMacValue SHA256 認證方式。由於本機開發無法對外提供 ReturnURL，付款驗證改以**本地端主動查詢**取代被動接收 Callback。
+
+**付款流程**：
+
+```
+使用者填寫結帳表單
+  → POST /api/orders（建立訂單，含 merchant_trade_no）
+  → GET /api/orders/:id/ecpay-params（取得含 CheckMacValue 的表單參數）
+  → 前端動態建立隱藏 <form> 並 POST submit
+  → 瀏覽器跳轉至綠界付款頁（使用者選擇付款方式並完成付款）
+  → 綠界 ClientBackURL 導回 /orders/:id?payment=done
+  → 使用者點「確認付款結果」
+  → POST /api/orders/:id/verify-payment（呼叫 QueryTradeInfo/V5 查詢）
+  → 更新訂單 status
+```
+
+### 8.2 環境設定（.env）
+
+| 變數 | 說明 | 測試值 |
+|------|------|--------|
+| `ECPAY_MERCHANT_ID` | 特店編號 | `3002607` |
+| `ECPAY_HASH_KEY` | HashKey | `pwFHCqoQZGmho4w6` |
+| `ECPAY_HASH_IV` | HashIV | `EkRm7iFT261dpevs` |
+| `ECPAY_ENV` | 環境切換 | `staging`（正式環境設為 `production`） |
+| `BASE_URL` | 本機服務 URL，用於組 ReturnURL 與 ClientBackURL | `http://localhost:3001` |
+
+### 8.3 核心工具模組（src/lib/ecpay.js）
+
+| 函式 | 說明 |
+|------|------|
+| `ecpayUrlEncode(source)` | ECPay 專用 URL encode（urlencode → 轉小寫 → .NET 特殊字元還原） |
+| `generateCheckMacValue(params)` | 產生 CheckMacValue（SHA256，Key 不區分大小寫排序） |
+| `buildAioParams(order, items, returnUrl, clientBackUrl, choosePayment)` | 組合完整 AIO 建單參數，包含 CheckMacValue |
+| `queryTradeInfo(merchantTradeNo)` | 呼叫 ECPay QueryTradeInfo/V5，回傳解析後的 key-value 物件 |
+
+### 8.4 付款方式
+
+`ChoosePayment` 參數支援值：
+
+| 值 | 說明 |
+|----|------|
+| `ALL`（預設） | 讓使用者在綠界頁面自行選擇所有可用方式 |
+| `Credit` | 信用卡（含分期、定期定額） |
+| `WebATM` | 網路 ATM |
+| `ATM` | ATM 轉帳（非即時，需等待轉帳到帳） |
+| `CVS` | 超商代碼繳費（非即時） |
+| `BARCODE` | 超商條碼繳費（非即時） |
+| `ApplePay` | Apple Pay |
+| `TWQR` | 台灣 Pay（TWQR） |
+| `BNPL` | 先買後付 |
+| `WeiXin` | 微信支付 |
+| `DigitalPayment` | 數位支付 |
+
+> ⚠️ ATM、CVS、BARCODE 為非即時付款方式，使用者取號後需另行繳費，`verify-payment` 在繳費完成前查詢會維持 `pending`。
+
+### 8.5 MerchantTradeNo 格式
+
+格式：`EC` + `Date.now()`（例：`EC1745483200000`，共 15 碼英數字），唯一性由時間戳保證。儲存於 `orders.merchant_trade_no` 欄位。
