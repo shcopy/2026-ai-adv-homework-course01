@@ -10,7 +10,8 @@ createApp({
 
     const order = ref(null);
     const loading = ref(true);
-    const paying = ref(false);
+    const loadingEcpay = ref(false);
+    const verifying = ref(false);
 
     const statusMap = {
       pending: { label: '待付款', cls: 'bg-apricot/20 text-apricot' },
@@ -22,29 +23,55 @@ createApp({
       success: { text: '付款成功！感謝您的購買。', cls: 'bg-sage/10 text-sage border border-sage/20' },
       failed: { text: '付款失敗，請重試。', cls: 'bg-red-50 text-red-600 border border-red-100' },
       cancel: { text: '付款已取消。', cls: 'bg-apricot/10 text-apricot border border-apricot/20' },
+      done: { text: '已從綠界返回，請點「確認付款結果」更新訂單狀態。', cls: 'bg-blue-50 text-blue-600 border border-blue-100' },
     };
 
-    async function simulatePay(action) {
-      if (!order.value || paying.value) return;
-      paying.value = true;
+    async function goToEcpay() {
+      if (!order.value || loadingEcpay.value) return;
+      loadingEcpay.value = true;
       try {
-        const res = await apiFetch('/api/orders/' + order.value.id + '/pay', {
-          method: 'PATCH',
-          body: JSON.stringify({ action })
+        const res = await apiFetch('/api/orders/' + order.value.id + '/ecpay-params');
+        const { action, params } = res.data;
+
+        const ecpayForm = document.createElement('form');
+        ecpayForm.method = 'POST';
+        ecpayForm.action = action;
+        Object.entries(params).forEach(([k, v]) => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = k;
+          input.value = v;
+          ecpayForm.appendChild(input);
         });
-        order.value = res.data;
-        paymentResult.value = action === 'success' ? 'success' : 'failed';
+        document.body.appendChild(ecpayForm);
+        ecpayForm.submit();
       } catch (e) {
-        Notification.show('付款處理失敗', 'error');
-      } finally {
-        paying.value = false;
+        Notification.show('無法載入綠界付款頁', 'error');
+        loadingEcpay.value = false;
       }
     }
 
-    function handlePaySuccess() { simulatePay('success'); }
-    function handlePayFail() { simulatePay('fail'); }
+    async function verifyPayment() {
+      if (!order.value || verifying.value) return;
+      verifying.value = true;
+      try {
+        const res = await apiFetch('/api/orders/' + order.value.id + '/verify-payment', { method: 'POST' });
+        order.value = res.data;
+        const msgMap = { paid: '付款成功', failed: '付款失敗', pending: '尚未付款，請完成綠界付款後再查詢' };
+        Notification.show(msgMap[res.data.status] || res.message, res.data.status === 'paid' ? 'success' : 'error');
+      } catch (e) {
+        Notification.show(e?.data?.message || '查詢付款狀態失敗', 'error');
+      } finally {
+        verifying.value = false;
+      }
+    }
 
     onMounted(async function () {
+      // 從 URL 讀取 payment 參數
+      const urlParams = new URLSearchParams(window.location.search);
+      const paymentParam = urlParams.get('payment');
+      if (paymentParam) paymentResult.value = paymentParam;
+
       try {
         const res = await apiFetch('/api/orders/' + orderId);
         order.value = res.data;
@@ -55,6 +82,10 @@ createApp({
       }
     });
 
-    return { order, loading, paying, paymentResult, statusMap, paymentMessages, handlePaySuccess, handlePayFail };
+    return {
+      order, loading, loadingEcpay, verifying,
+      paymentResult, statusMap, paymentMessages,
+      goToEcpay, verifyPayment,
+    };
   }
 }).mount('#app');

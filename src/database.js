@@ -68,6 +68,11 @@ function initializeDatabase() {
     );
   `);
 
+  // Migration: add merchant_trade_no column if not exists
+  try {
+    db.exec('ALTER TABLE orders ADD COLUMN merchant_trade_no TEXT');
+  } catch (_) {}
+
   // Seed data
   seedAdminUser();
   seedProducts();

@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../database');
 const authMiddleware = require('../middleware/authMiddleware');
+const { buildAioParams, queryTradeInfo } = require('../lib/ecpay');
 
 const router = express.Router();
 
@@ -133,13 +134,14 @@ router.post('/', (req, res) => {
 
   const orderId = uuidv4();
   const orderNo = generateOrderNo();
+  const merchantTradeNo = 'EC' + Date.now();
 
   // Transaction: create order, order items, deduct stock, clear cart
   const createOrder = db.transaction(() => {
     db.prepare(
-      `INSERT INTO orders (id, order_no, user_id, recipient_name, recipient_email, recipient_address, total_amount)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(orderId, orderNo, userId, recipientName, recipientEmail, recipientAddress, totalAmount);
+      `INSERT INTO orders (id, order_no, user_id, recipient_name, recipient_email, recipient_address, total_amount, merchant_trade_no)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(orderId, orderNo, userId, recipientName, recipientEmail, recipientAddress, totalAmount, merchantTradeNo);
 
     const insertItem = db.prepare(
       `INSERT INTO order_items (id, order_id, product_id, product_name, product_price, quantity)
@@ -413,6 +415,66 @@ router.patch('/:id/pay', (req, res) => {
     error: null,
     message: action === 'success' ? '付款成功' : '付款失敗'
   });
+});
+
+// GET /api/orders/:id/ecpay-params — 取得 ECPay AIO 表單參數
+router.get('/:id/ecpay-params', (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
+  if (!order) {
+    return res.status(404).json({ data: null, error: 'NOT_FOUND', message: '訂單不存在' });
+  }
+  if (order.status !== 'pending') {
+    return res.status(400).json({ data: null, error: 'INVALID_STATUS', message: '訂單狀態不是 pending' });
+  }
+  if (!order.merchant_trade_no) {
+    return res.status(400).json({ data: null, error: 'VALIDATION_ERROR', message: '訂單缺少綠界交易編號' });
+  }
+
+  const items = db.prepare('SELECT product_name FROM order_items WHERE order_id = ?').all(order.id);
+  const baseUrl = process.env.BASE_URL || 'http://localhost:3001';
+  const returnUrl = `${baseUrl}/api/ecpay/notify`;
+  const clientBackUrl = `${baseUrl}/orders/${order.id}?payment=done`;
+
+  const allowed = ['ALL', 'Credit', 'WebATM', 'ATM', 'CVS', 'BARCODE', 'ApplePay', 'TWQR', 'BNPL', 'WeiXin', 'DigitalPayment'];
+  const choosePayment = allowed.includes(req.query.choosePayment) ? req.query.choosePayment : 'ALL';
+
+  const { action, params } = buildAioParams(order, items, returnUrl, clientBackUrl, choosePayment);
+
+  res.json({ data: { action, params }, error: null, message: '成功' });
+});
+
+// POST /api/orders/:id/verify-payment — 主動向 ECPay 查詢付款結果
+router.post('/:id/verify-payment', async (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
+  if (!order) {
+    return res.status(404).json({ data: null, error: 'NOT_FOUND', message: '訂單不存在' });
+  }
+  if (!order.merchant_trade_no) {
+    return res.status(400).json({ data: null, error: 'VALIDATION_ERROR', message: '訂單缺少綠界交易編號' });
+  }
+
+  try {
+    const result = await queryTradeInfo(order.merchant_trade_no);
+    let newStatus = order.status;
+
+    if (result.TradeStatus === '1') {
+      newStatus = 'paid';
+    } else if (result.TradeStatus !== '0') {
+      newStatus = 'failed';
+    }
+
+    if (newStatus !== order.status) {
+      db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(newStatus, order.id);
+    }
+
+    const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+
+    const messages = { paid: '付款成功', failed: '付款失敗', pending: '尚未付款' };
+    res.json({ data: { ...updated, items }, error: null, message: messages[newStatus] || '查詢完成' });
+  } catch (err) {
+    res.status(502).json({ data: null, error: 'ECPAY_ERROR', message: '綠界查詢失敗：' + err.message });
+  }
 });
 
 module.exports = router;

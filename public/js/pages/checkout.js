@@ -36,11 +36,25 @@ createApp({
           method: 'POST',
           body: JSON.stringify(form.value)
         });
-        Notification.show('訂單已建立', 'success');
-        window.location.href = '/orders/' + res.data.id;
+        const orderId = res.data.id;
+
+        const formRes = await apiFetch('/api/orders/' + orderId + '/ecpay-params');
+        const { action, params } = formRes.data;
+
+        const ecpayForm = document.createElement('form');
+        ecpayForm.method = 'POST';
+        ecpayForm.action = action;
+        Object.entries(params).forEach(([k, v]) => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = k;
+          input.value = v;
+          ecpayForm.appendChild(input);
+        });
+        document.body.appendChild(ecpayForm);
+        ecpayForm.submit();
       } catch (err) {
         Notification.show(err?.data?.message || '訂單建立失敗', 'error');
-      } finally {
         submitting.value = false;
       }
     }

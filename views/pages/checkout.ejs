@@ -74,6 +74,8 @@
             NT$ {{ (cartTotal + (cartTotal >= 500 ? 0 : 150)).toLocaleString() }}
           </span>
         </div>
+        <p class="text-xs text-text-muted mt-4 text-center">點擊後將跳轉至綠界科技選擇付款方式</p>
+
         <button
           @click="submitOrder"
           :disabled="submitting"
